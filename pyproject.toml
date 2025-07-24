@@ -1,0 +1,20 @@
+[project]
+name = "metalmid"
+version = "0.1.0"
+description = "GPU-accelerated MIDI generator using Metal and Python"
+authors = [
+  { name = "phntmzn", email = "phntmzn@protonmail.com" }
+]
+license = { text = "Proprietary" }
+readme = "README.md"
+requires-python = ">=3.9"
+
+dependencies = [
+  "numpy",
+  "tqdm",
+  "midiutil"
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"

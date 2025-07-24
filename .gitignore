@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# macOS
+.DS_Store
+
+# MIDI and temp output
+*.mid
+*.wav
+*.aif
+*.aiff
+*.flac
+*.ogg
+*.mp3
+*.tmp
+*.swp
+*.swo
+
+# Metal shader outputs
+*.air
+*.metallib
+
+# Virtual env
+.venv/
+env/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VSCode
+.vscode/
+
+# System-specific
+Thumbs.db

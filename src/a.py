@@ -88,10 +88,6 @@ TOTAL_BEATS = BEATS_PER_MINUTE * DURATION_MINUTES
 BEATS_PER_BAR = 4
 BARS = 4
 
-# Try to import Metal, but gracefully fall back if not available
-METAL_AVAILABLE = False
-MTLCreateSystemDefaultDevice = None
-MTLResourceStorageModeShared = 0
 
 
 class SimpleMetalProcessor:
@@ -206,12 +202,13 @@ class SimpleMetalProcessor:
                 # Execute and wait
                 cmd_buffer.commit()
                 cmd_buffer.waitUntilCompleted()
-                # Read results using safe ctypes.cast and buffer copy
+                # Read results using safe buffer copy
                 raw_ptr = output_buffer.contents()
                 if raw_ptr is None:
                     raise RuntimeError("Output buffer has no contents")
 
-                buf = ctypes.cast(raw_ptr, ctypes.POINTER(ctypes.c_float * count)).contents
+                array_type = ctypes.c_float * count
+                buf = ctypes.cast(raw_ptr, ctypes.POINTER(array_type)).contents
                 return list(buf)
             except Exception as e:
                 raise RuntimeError(f"Metal computation failed: {e}")
@@ -240,11 +237,10 @@ def get_metal_processor():
                     return metal_processor
                 except Exception as e:
                     print(f"⚠️  Metal processor creation failed: {e}")
-                    metal_processor = False
+                    raise RuntimeError("Metal processor not available")
             else:
-                metal_processor = False
-        
-        return metal_processor if metal_processor is not False else None
+                raise RuntimeError("Metal processor not available")
+        return metal_processor
 
 def generate_chord_pattern():
     """Generate a MIDI chord pattern using Locrian mode"""
@@ -320,43 +316,17 @@ def generate_chord_pattern():
             midi.addNote(0, 0, note, time, duration, 100)
     return midi
 
-def generate_values_cpu(seed, count, value_type):
-    """CPU fallback for random value generation"""
-    if count <= 0:
-        return []
-        
-    random.seed(seed)
-    values = []
-    
-    for _ in range(count):
-        rand_val = random.random()  # 0.0 to 1.0
-        
-        if value_type == 'velocity':
-            # Map to MIDI velocity range (40-127)
-            values.append(int(40 + rand_val * 87))
-        elif value_type == 'note_offset':
-            # Map to note offset range (-12 to +12)
-            values.append(int(-12 + rand_val * 24))
-        elif value_type == 'duration_index':
-            # Map to duration index (0 to len-1)
-            values.append(int(rand_val * len(time_value_durations)) % len(time_value_durations))
-        else:
-            values.append(rand_val)
-    
-    return values
 
 def generate_values_gpu(seed, count, value_type):
     """GPU-based random value generation"""
     processor = get_metal_processor()
     if not processor:
-        return generate_values_cpu(seed, count, value_type)
-    
+        raise RuntimeError("Metal processor not available")
     try:
         # Get raw random values from GPU
         raw_values = processor.generate_random_values(seed, count)
         if not raw_values:
-            return generate_values_cpu(seed, count, value_type)
-        
+            raise RuntimeError("Metal processor not available")
         # Map to appropriate ranges
         mapped_values = []
         for val in raw_values:
@@ -368,12 +338,10 @@ def generate_values_gpu(seed, count, value_type):
                 mapped_values.append(int(val * len(time_value_durations)))
             else:
                 mapped_values.append(val)
-        
         return mapped_values
-        
     except Exception as e:
-        print(f"⚠️  GPU generation failed, using CPU: {e}")
-        return generate_values_cpu(seed, count, value_type)
+        print(f"⚠️  GPU generation failed: {e}")
+        raise RuntimeError("Metal processor not available")
 
 def generate_midi_file(args):
     """Generate a single MIDI file"""
@@ -382,19 +350,15 @@ def generate_midi_file(args):
     try:
         # Generate base seed
         base_seed = random.randint(0, 100000)
-        
         # Generate parameter arrays
         try:
             if use_gpu:
                 velocities = generate_values_gpu(base_seed, num_chords * 4, 'velocity')
                 note_offsets = generate_values_gpu(base_seed + 1, num_chords * 4, 'note_offset')
-                duration_indices = generate_values_cpu(base_seed + 2, num_chords, 'duration_index')  # Use CPU for this
-                generation_method = "GPU" if get_metal_processor() else "CPU"
+                duration_indices = generate_values_gpu(base_seed + 2, num_chords, 'duration_index')
+                generation_method = "GPU"
             else:
-                velocities = generate_values_cpu(base_seed, num_chords * 4, 'velocity')
-                note_offsets = generate_values_cpu(base_seed + 1, num_chords * 4, 'note_offset')
-                duration_indices = generate_values_cpu(base_seed + 2, num_chords, 'duration_index')
-                generation_method = "CPU"
+                raise RuntimeError("GPU not available; CPU fallback not allowed")
         except Exception as e:
             return f"❌ MIDI {index} parameter generation failed: {str(e)}"
         
@@ -509,27 +473,16 @@ def main():
         if processor:
             print("🚀 GPU acceleration ready")
         else:
-            print("⚠️  GPU acceleration unavailable, using CPU")
+            raise RuntimeError("GPU acceleration unavailable")
     else:
-        print("💻 Using CPU generation")
+        raise RuntimeError("GPU not available")
     print()
-    
     # Generate files
     args_list = [(i, num_chords, use_gpu) for i in range(total_files)]
     start_time = time.time()
-    
-    if use_gpu:
-        results = []
-        for args in tqdm(args_list, desc="Generating"):
-            results.append(generate_midi_file(args))
-    else:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            results = list(tqdm(
-                executor.map(generate_midi_file, args_list),
-                total=total_files,
-                desc="Generating"
-            ))
-    
+    results = []
+    for args in tqdm(args_list, desc="Generating"):
+        results.append(generate_midi_file(args))
     end_time = time.time()
     
     # Results

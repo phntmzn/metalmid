@@ -1,3 +1,11 @@
+# Direct import for Metal and dependencies
+import objc
+from Cocoa import NSObject
+from Metal import MTLCreateSystemDefaultDevice, MTLResourceStorageModeShared
+from Foundation import NSData
+
+METAL_AVAILABLE = True
+print("🔧 Metal framework loaded successfully")
 # a.py — GPU-assisted MIDI generator (.mid output) - Fixed Version
 
 import random
@@ -40,6 +48,29 @@ time_value_durations = {
     "thirty_second_note": 0.125
 }
 
+# === Additional definitions for scales and modes ===
+scales = {
+    "major": [0, 2, 4, 5, 7, 9, 11],
+    "minor": [0, 2, 3, 5, 7, 8, 10],
+    "harmonic_minor": [0, 2, 3, 5, 7, 8, 11],
+    "melodic_minor": [0, 2, 3, 5, 7, 9, 11],
+    "dorian": [0, 2, 3, 5, 7, 9, 10],
+    "phrygian": [0, 1, 3, 5, 7, 8, 10],
+    "lydian": [0, 2, 4, 6, 7, 9, 11],
+    "mixolydian": [0, 2, 4, 5, 7, 9, 10],
+    "locrian": [0, 1, 3, 5, 6, 8, 10]
+}
+
+modes = {
+    "ionian": scales["major"],
+    "aeolian": scales["minor"],
+    "dorian": scales["dorian"],
+    "phrygian": scales["phrygian"],
+    "lydian": scales["lydian"],
+    "mixolydian": scales["mixolydian"],
+    "locrian": scales["locrian"]
+}
+
 # Convert durations dict to list for index-based access
 DURATIONS = list(time_value_durations.values())
 
@@ -55,25 +86,13 @@ BEATS_PER_MINUTE = TEMPO
 DURATION_MINUTES = 2
 TOTAL_BEATS = BEATS_PER_MINUTE * DURATION_MINUTES
 BEATS_PER_BAR = 4
-BARS = TOTAL_BEATS // BEATS_PER_BAR
+BARS = 4
 
 # Try to import Metal, but gracefully fall back if not available
 METAL_AVAILABLE = False
 MTLCreateSystemDefaultDevice = None
 MTLResourceStorageModeShared = 0
 
-try:
-    import objc
-    from Cocoa import NSObject
-    from Metal import MTLCreateSystemDefaultDevice, MTLResourceStorageModeShared
-    from Foundation import NSData
-    
-    METAL_AVAILABLE = True
-    print("🔧 Metal framework loaded successfully")
-except ImportError as e:
-    print(f"⚠️  Metal framework not available: {e}")
-except Exception as e:
-    print(f"⚠️  Metal initialization failed: {e}")
 
 class SimpleMetalProcessor:
     """Simplified Metal processor with safer buffer handling"""
@@ -96,7 +115,16 @@ class SimpleMetalProcessor:
         shader_source = """
         #include <metal_stdlib>
         using namespace metal;
-        
+
+        // === Scale and mode interval definitions ===
+        constant int major_scale[7] = {0, 2, 4, 5, 7, 9, 11};
+        constant int minor_scale[7] = {0, 2, 3, 5, 7, 8, 10};
+        constant int dorian_mode[7] = {0, 2, 3, 5, 7, 9, 10};
+        constant int phrygian_mode[7] = {0, 1, 3, 5, 7, 8, 10};
+        constant int lydian_mode[7] = {0, 2, 4, 6, 7, 9, 11};
+        constant int mixolydian_mode[7] = {0, 2, 4, 5, 7, 9, 10};
+        constant int locrian_mode[7] = {0, 1, 3, 5, 6, 8, 10};
+
         kernel void generate_random(device float *output [[buffer(0)]],
                                    constant uint &seed [[buffer(1)]],
                                    uint id [[thread_position_in_grid]]) {
@@ -138,7 +166,8 @@ class SimpleMetalProcessor:
         """Generate random float values between 0 and 1"""
         if count <= 0:
             return []
-            
+        if count > 4096:
+            raise ValueError(f"Count too high for safe Metal dispatch: {count}")
         with self.lock:
             try:
                 # Create output buffer
@@ -146,58 +175,44 @@ class SimpleMetalProcessor:
                 output_buffer = self.device.newBufferWithLength_options_(
                     buffer_size, MTLResourceStorageModeShared
                 )
-                
                 if not output_buffer:
                     raise RuntimeError("Could not create output buffer")
-                
-                # Create seed buffer (single uint32)
+                # Create seed buffer (single uint32), pass pointer directly for correct Metal binding
                 seed_value = ctypes.c_uint32(seed % (2**32))
-                seed_bytes = ctypes.string_at(ctypes.byref(seed_value), 4)
                 seed_buffer = self.device.newBufferWithBytes_length_options_(
-                    seed_bytes, 4, MTLResourceStorageModeShared
+                    ctypes.byref(seed_value), ctypes.sizeof(seed_value), MTLResourceStorageModeShared
                 )
-                
                 if not seed_buffer:
                     raise RuntimeError("Could not create seed buffer")
-                
                 # Create command buffer and encoder
                 cmd_buffer = self.queue.commandBuffer()
                 if not cmd_buffer:
                     raise RuntimeError("Could not create command buffer")
-                    
                 encoder = cmd_buffer.computeCommandEncoder()
                 if not encoder:
                     raise RuntimeError("Could not create compute encoder")
-                
                 # Set up compute pass
                 encoder.setComputePipelineState_(self.pipeline)
                 encoder.setBuffer_offset_atIndex_(output_buffer, 0, 0)
                 encoder.setBuffer_offset_atIndex_(seed_buffer, 0, 1)
-                
                 # Dispatch threads
                 threads_per_group = min(32, count)  # Conservative thread group size
-                num_groups = (count + threads_per_group - 1) // threads_per_group
-                
+                # Calculate total_threads as the next multiple of threads_per_group >= count
+                total_threads = ((count + threads_per_group - 1) // threads_per_group) * threads_per_group
+                grid_size = self.MTLSizeMake(total_threads, 1, 1)
                 threadgroup_size = self.MTLSizeMake(threads_per_group, 1, 1)
-                grid_size = self.MTLSizeMake(count, 1, 1)
-                
                 encoder.dispatchThreads_threadsPerThreadgroup_(grid_size, threadgroup_size)
                 encoder.endEncoding()
-                
                 # Execute and wait
                 cmd_buffer.commit()
                 cmd_buffer.waitUntilCompleted()
-                
-                # Read results using NSData for safety
-                data = NSData.dataWithBytesNoCopy_length_freeWhenDone_(
-                    output_buffer.contents(),
-                    output_buffer.length(),
-                    False
-                )
-                
-                buf = (ctypes.c_float * count).from_buffer_copy(data.bytes())
+                # Read results using safe ctypes.cast and buffer copy
+                raw_ptr = output_buffer.contents()
+                if raw_ptr is None:
+                    raise RuntimeError("Output buffer has no contents")
+
+                buf = ctypes.cast(raw_ptr, ctypes.POINTER(ctypes.c_float * count)).contents
                 return list(buf)
-                
             except Exception as e:
                 raise RuntimeError(f"Metal computation failed: {e}")
     
@@ -238,6 +253,25 @@ def generate_chord_pattern():
     note_to_semitone = {note: i for i, note in enumerate(chromatic_scale)}
     semitone_to_note = {i: note for i, note in enumerate(chromatic_scale)}
 
+    # === Use GPU-based random selection for root note and progression ===
+    seed = int(time.time()) + 42  # Optional external seed
+
+    # Metal-style Locrian progressions
+    metal_locrian_progressions = [
+        [0, 6, 5, 4],  # i° - bVII - bVI - V
+        [0, 3, 1, 4],  # i° - iv - II - V
+        [0, 6, 0],     # i° - bVII - i°
+        [0, 1, 3, 5]   # i° - II - iv - bVI
+    ]
+    root_idx = generate_values_gpu(seed, 1, 'raw')[0]
+    prog_idx = generate_values_gpu(seed + 1, 1, 'raw')[0]
+
+    root_note = chromatic_scale[int(root_idx * len(chromatic_scale)) % len(chromatic_scale)]
+    progression_degrees = metal_locrian_progressions[int(prog_idx * len(metal_locrian_progressions)) % len(metal_locrian_progressions)]
+    # Old random selection lines (now replaced by GPU):
+    # root_note = random.choice(chromatic_scale)
+    # progression_degrees = random.choice(metal_locrian_progressions)
+
     # Locrian mode intervals in semitones from tonic
     locrian_intervals = [0, 1, 3, 5, 6, 8, 10]
 
@@ -252,8 +286,6 @@ def generate_chord_pattern():
         "Minor"        # bVII
     ]
 
-    # Select random root note from chromatic scale
-    root_note = random.choice(chromatic_scale)
     root_semitone = note_to_semitone[root_note]
 
     # Build Locrian scale notes based on root
@@ -262,37 +294,30 @@ def generate_chord_pattern():
         semitone = (root_semitone + interval) % 12
         locrian_scale.append(semitone_to_note[semitone])
 
-    # Metal-style Locrian progressions
-    metal_locrian_progressions = [
-        [0, 6, 5, 4],  # i° - bVII - bVI - V
-        [0, 3, 1, 4],  # i° - iv - II - V
-        [0, 6, 0],     # i° - bVII - i°
-        [0, 1, 3, 5]   # i° - II - iv - bVI
-    ]
-    progression_degrees = random.choice(metal_locrian_progressions)
-
     duration = time_value_durations["eighth_note"]
     steps_per_bar = 4  # quarter notes per bar
-    total_steps = BARS * steps_per_bar
 
     midi = MIDIFile(1)
     midi.addTempo(0, 0, TEMPO)
 
-    for step in range(total_steps):
-        time = step * duration
-        bar_index = step // steps_per_bar
-        prog_idx = bar_index % len(progression_degrees)
-        scale_degree = progression_degrees[prog_idx]
-        root_scale_note = locrian_scale[scale_degree]
-        chord_type = locrian_chord_types[scale_degree]
-        intervals = chords.get(chord_type, chords["Minor"])  # Fallback to Minor if chord type not found
-        root_note_number = notes[root_scale_note]
-        
-        # Play one note from the chord in sequence (arpeggio), one per quarter note
-        interval = intervals[step % len(intervals)]
-        note = root_note_number + interval + 1 * 12  # Add octave
-        midi.addNote(0, 0, note, time, duration, 100)
-    
+    # === Generate 4-bar arpeggio ===
+    steps_per_bar = 4
+    duration = BEATS_PER_BAR / steps_per_bar  # each note gets one step
+
+    for bar_index in range(BARS):  # 4 bars
+        for step in range(steps_per_bar):
+            time = float(bar_index * BEATS_PER_BAR + step * duration)
+            prog_idx = (bar_index * steps_per_bar + step) % len(progression_degrees)
+            scale_degree = progression_degrees[prog_idx]
+            root_scale_note = locrian_scale[scale_degree]
+            chord_type = locrian_chord_types[scale_degree]
+            intervals = chords.get(chord_type, chords["Minor"])
+            root_note_number = notes[root_scale_note]
+
+            # Add arpeggiated notes: one note per step
+            interval = intervals[step % len(intervals)]
+            note = root_note_number + interval + 60
+            midi.addNote(0, 0, note, time, duration, 100)
     return midi
 
 def generate_values_cpu(seed, count, value_type):
@@ -393,9 +418,9 @@ def generate_midi_file(args):
             
             midi.addTrackName(track, time, f"{generation_method} Track {index}")
             
-            # Vary tempo
-            tempo = int(80 + (index % 80))
-            midi.addTempo(track, time, tempo)
+            # Use fixed tempo
+            tempo = TEMPO
+            midi.addTempo(track, time, TEMPO)
             channel = 0
         except Exception as e:
             return f"❌ MIDI {index} MIDI setup failed: {str(e)}"
@@ -404,7 +429,10 @@ def generate_midi_file(args):
         try:
             chord_names = list(chords.keys())
             
+            max_time = BARS * BEATS_PER_BAR
             for chord_idx in range(num_chords):
+                if time >= max_time:
+                    break
                 # Select chord - use index instead of velocity to avoid issues
                 chord_name = chord_names[chord_idx % len(chord_names)]
                 chord_notes = chords[chord_name]
@@ -464,9 +492,9 @@ def main():
     
     # Configuration
     total_files = 10
-    num_chords = 8
+    num_chords = 4
     use_gpu = True  # Disable GPU by default due to Metal buffer issues
-    max_workers = 4
+    max_workers = cpu_count()
     
     print(f"Generating {total_files} MIDI files...")
     print(f"Chords per file: {num_chords}")
@@ -490,12 +518,17 @@ def main():
     args_list = [(i, num_chords, use_gpu) for i in range(total_files)]
     start_time = time.time()
     
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(tqdm(
-            executor.map(generate_midi_file, args_list),
-            total=total_files,
-            desc="Generating"
-        ))
+    if use_gpu:
+        results = []
+        for args in tqdm(args_list, desc="Generating"):
+            results.append(generate_midi_file(args))
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            results = list(tqdm(
+                executor.map(generate_midi_file, args_list),
+                total=total_files,
+                desc="Generating"
+            ))
     
     end_time = time.time()
     

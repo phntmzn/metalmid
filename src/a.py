@@ -10,6 +10,9 @@ from tqdm import tqdm
 from midiutil import MIDIFile
 from b import notes, chords, time_value_durations
 
+# Convert durations dict to list for index-based access
+DURATIONS = list(time_value_durations.values())
+
 OUTPUT_DIR = Path.home() / "Desktop" / "MIDI_Output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -305,34 +308,34 @@ def generate_midi_file(args):
                 # Select chord - use index instead of velocity to avoid issues
                 chord_name = chord_names[chord_idx % len(chord_names)]
                 chord_notes = chords[chord_name]
-                
+
                 # Get duration
-                duration_idx = abs(int(duration_indices[chord_idx])) % len(time_value_durations)
-                duration = float(time_value_durations[duration_idx])
-                
+                duration_idx = abs(int(duration_indices[chord_idx])) % len(DURATIONS)
+                duration = float(DURATIONS[duration_idx])
+
                 # Add notes
                 for note_idx, base_note in enumerate(chord_notes):
                     # Calculate final parameters
                     array_idx = chord_idx * 4 + note_idx
-                    
+
                     if array_idx < len(note_offsets):
                         note_offset = int(note_offsets[array_idx])
                     else:
                         note_offset = 0
-                    
+
                     final_note = max(0, min(127, int(base_note) + note_offset))
-                    
+
                     if array_idx < len(velocities):
                         velocity = max(1, min(127, abs(int(velocities[array_idx]))))
                     else:
                         velocity = 64
-                    
+
                     # Debug for first chord of first file
                     if index == 0 and chord_idx == 0 and note_idx == 0:
                         print(f"Debug - First note: {final_note}, velocity: {velocity}, time: {time}, duration: {duration}")
-                    
+
                     midi.addNote(track, channel, final_note, time, duration, velocity)
-                
+
                 time += duration
         except Exception as e:
             return f"❌ MIDI {index} chord generation failed: {str(e)}"

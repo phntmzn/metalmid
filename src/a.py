@@ -36,7 +36,7 @@ print(“🔧 Metal framework loaded successfully”)
 class SimpleMetalProcessor:
 “”“Simplified Metal processor with safer buffer handling”””
 
-```
+
 def __init__(self):
     if not METAL_AVAILABLE or MTLCreateSystemDefaultDevice is None:
         raise RuntimeError("Metal not available")
@@ -167,7 +167,7 @@ def MTLSizeMake(self, width, height, depth):
     except:
         # Fallback if struct creation fails
         return (width, height, depth)
-```
+
 
 # Global processor instance
 
@@ -189,16 +189,16 @@ metal_processor = False
 else:
 metal_processor = False
 
-```
+
     return metal_processor if metal_processor is not False else None
-```
+
 
 def generate_values_cpu(seed, count, value_type):
 “”“CPU fallback for random value generation”””
 if count <= 0:
 return []
 
-```
+
 random.seed(seed)
 values = []
 
@@ -218,7 +218,7 @@ for _ in range(count):
         values.append(rand_val)
 
 return values
-```
+
 
 def generate_values_gpu(seed, count, value_type):
 “”“GPU-based random value generation”””
@@ -226,7 +226,7 @@ processor = get_metal_processor()
 if not processor:
 return generate_values_cpu(seed, count, value_type)
 
-```
+
 try:
     # Get raw random values from GPU
     raw_values = processor.generate_random_values(seed, count)
@@ -250,13 +250,13 @@ try:
 except Exception as e:
     print(f"⚠️  GPU generation failed, using CPU: {e}")
     return generate_values_cpu(seed, count, value_type)
-```
+
 
 def generate_midi_file(args):
 “”“Generate a single MIDI file”””
 index, num_chords, use_gpu = args
 
-```
+
 try:
     # Generate base seed
     base_seed = random.randint(0, 100000)
@@ -360,14 +360,14 @@ try:
 except Exception as e:
     import traceback
     return f"❌ MIDI {index} unexpected error: {str(e)}\n{traceback.format_exc()}"
-```
+
 
 def main():
 “”“Main function”””
 print(“🎵 GPU-Assisted MIDI Generator v2”)
 print(”=” * 40)
 
-```
+
 # Configuration - GPU ENABLED
 total_files = 50  # Increased to better utilize GPU
 num_chords = 16   # More chords per file for better GPU utilization
@@ -443,7 +443,7 @@ if successes:
     total_notes = len(successes) * num_chords * 4  # Assuming 4 notes per chord
     notes_per_second = total_notes / (end_time - start_time)
     print(f"\n📊 Performance: {notes_per_second:.0f} notes/second")
-```
+
 
 if **name** == “**main**”:
 main()

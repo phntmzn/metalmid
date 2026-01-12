@@ -157,11 +157,20 @@ class SimpleMetalProcessor:
                 if not output_buffer:
                     raise RuntimeError("Could not create output buffer")
                     
-                # Create seed buffer as bytes
-                seed_bytes = struct.pack("I", seed % (2**32))
-                seed_buffer = self.device.newBufferWithBytes_length_options_(
-                    seed_bytes, len(seed_bytes), MTLResourceStorageModeShared
+                # Create seed buffer - allocate empty buffer and write to it
+                seed_value = seed % (2**32)
+                seed_buffer = self.device.newBufferWithLength_options_(
+                    4,  # 4 bytes for uint32
+                    MTLResourceStorageModeShared
                 )
+                if not seed_buffer:
+                    raise RuntimeError("Could not create seed buffer")
+                
+                # Write seed value directly to buffer memory
+                seed_ptr = seed_buffer.contents()
+                if seed_ptr is None:
+                    raise RuntimeError("Seed buffer has no contents")
+                ctypes.memmove(seed_ptr, ctypes.byref(ctypes.c_uint32(seed_value)), 4)
                 if not seed_buffer:
                     raise RuntimeError("Could not create seed buffer")
                     
@@ -248,6 +257,8 @@ def generate_values_gpu(seed, count, value_type):
                         mapped_values.append(int(val * len(DURATIONS)))
                     elif value_type == 'chord_index':
                         mapped_values.append(int(val * len(chords)))
+                    elif value_type == 'raw':
+                        mapped_values.append(val)  # Keep raw 0-1 values
                     else:
                         mapped_values.append(val)
                 return mapped_values, True  # Success, used GPU
@@ -281,25 +292,81 @@ def generate_midi_file(args):
         # Use prime number multiplier to ensure good distribution
         base_seed = abs((base_time + index * 104729) % (2**31))
         
+        # Common chord progressions in various keys
+        progressions = {
+            'I-V-vi-IV': [0, 4, 5, 3],      # Pop progression (C-G-Am-F)
+            'I-IV-V': [0, 3, 4],             # Classic rock (C-F-G)
+            'ii-V-I': [1, 4, 0],             # Jazz turnaround (Dm-G-C)
+            'I-vi-IV-V': [0, 5, 3, 4],       # 50s progression (C-Am-F-G)
+            'I-IV-vi-V': [0, 3, 5, 4],       # Sensitive (C-F-Am-G)
+            'vi-IV-I-V': [5, 3, 0, 4],       # Emotional (Am-F-C-G)
+            'I-V-IV': [0, 4, 3],             # Simple rock (C-G-F)
+            'I-bVII-IV': [0, 6, 3],          # Mixolydian rock (C-Bb-F)
+        }
+        
+        # Major scale chord qualities (I-vii°)
+        major_scale_chords = ['Major', 'Minor', 'Minor', 'Major', 'Major', 'Minor', 'Diminished']
+        
+        # Note names for key signature
+        note_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+        
+        # Generate random selections
+        key_vals, gpu1 = generate_values_gpu(base_seed, 1, 'raw')
+        prog_vals, gpu2 = generate_values_gpu(base_seed + 1, 1, 'raw')
+        
+        # Select key and progression
+        root_note = int(key_vals[0] * 12) % 12  # 0-11 (C to B)
+        root_name = note_names[root_note]
+        
+        prog_items = list(progressions.items())
+        prog_name, selected_progression = prog_items[int(prog_vals[0] * len(prog_items)) % len(prog_items)]
+
+        # Build a human-readable chord list for ONE cycle of the selected progression (for filename)
+        degree_offsets = [0, 2, 4, 5, 7, 9, 11]  # Major scale intervals
+        quality_suffix = {
+            "Major": "",
+            "Minor": "m",
+            "Diminished": "dim",
+            "Augmented": "aug",
+            "Sus2": "sus2",
+            "Sus4": "sus4",
+            "Maj7": "maj7",
+            "Min7": "m7",
+        }
+
+        chord_symbols = []
+        for deg in selected_progression:
+            base_quality = major_scale_chords[deg % 7]
+            # Match the user's example style: use iii as a 7th chord when minor (e.g., Em7 in C major)
+            qual = "Min7" if (deg % 7 == 2 and base_quality == "Minor") else base_quality
+
+            chord_root = (root_note + degree_offsets[deg % 7]) % 12
+            chord_root_name = note_names[chord_root]
+            suffix = quality_suffix.get(qual, "")
+            chord_symbols.append(f"{chord_root_name}{suffix}")
+
+        filename_chords = "-".join(chord_symbols)
+        
+        # Generate enough repetitions of the progression to fill num_chords
+        full_progression = []
+        while len(full_progression) < num_chords:
+            full_progression.extend(selected_progression)
+        full_progression = full_progression[:num_chords]
+        
         # Calculate exact counts needed
-        max_notes_per_chord = max(len(chord) for chord in chords.values())
-        total_notes = num_chords * max_notes_per_chord
+        total_notes = num_chords * 4  # Assume max 4 notes per chord
         
         # Generate parameter arrays with correct counts
         try:
             if use_gpu:
-                velocities, gpu1 = generate_values_gpu(base_seed, total_notes, 'velocity')
-                note_offsets, gpu2 = generate_values_gpu(base_seed + 1, total_notes, 'note_offset')
-                duration_indices, gpu3 = generate_values_gpu(base_seed + 2, num_chords, 'duration_index')
-                chord_indices, gpu4 = generate_values_gpu(base_seed + 3, num_chords, 'chord_index')
+                velocities, gpu3 = generate_values_gpu(base_seed + 2, total_notes, 'velocity')
+                duration_indices, gpu4 = generate_values_gpu(base_seed + 3, num_chords, 'duration_index')
                 
                 used_gpu = gpu1 and gpu2 and gpu3 and gpu4
                 generation_method = "GPU" if used_gpu else "CPU"
             else:
-                velocities, _ = generate_values_gpu(base_seed, total_notes, 'velocity')
-                note_offsets, _ = generate_values_gpu(base_seed + 1, total_notes, 'note_offset')
-                duration_indices, _ = generate_values_gpu(base_seed + 2, num_chords, 'duration_index')
-                chord_indices, _ = generate_values_gpu(base_seed + 3, num_chords, 'chord_index')
+                velocities, _ = generate_values_gpu(base_seed + 2, total_notes, 'velocity')
+                duration_indices, _ = generate_values_gpu(base_seed + 3, num_chords, 'duration_index')
                 generation_method = "CPU"
                 
         except Exception as e:
@@ -307,9 +374,7 @@ def generate_midi_file(args):
         
         # Validate counts
         if (len(velocities) < total_notes or 
-            len(note_offsets) < total_notes or 
-            len(duration_indices) < num_chords or
-            len(chord_indices) < num_chords):
+            len(duration_indices) < num_chords):
             return f"❌ MIDI {index} insufficient parameters"
         
         # Create MIDI file
@@ -318,8 +383,13 @@ def generate_midi_file(args):
             track = 0
             time_pos = 0.0
             
-            midi.addTrackName(track, time_pos, f"{generation_method} Track {index}")
+            midi.addTrackName(track, time_pos, f"{generation_method} {root_name} Major")
             midi.addTempo(track, time_pos, TEMPO)
+            
+            # Add key signature (0 = C major, positive = sharps, negative = flats)
+            # For simplicity, use 0 for all keys (would need circle of fifths for proper implementation)
+            midi.addKeySignature(track, time_pos, 0, 0, 0)  # C major
+            
             channel = 0
             
         except Exception as e:
@@ -327,7 +397,6 @@ def generate_midi_file(args):
         
         # Generate chords
         try:
-            chord_names = list(chords.keys())
             max_time = BARS * BEATS_PER_BAR
             note_counter = 0
             
@@ -335,21 +404,29 @@ def generate_midi_file(args):
                 if time_pos >= max_time:
                     break
                 
-                # Select chord using pre-generated index
-                chord_name = chord_names[chord_indices[chord_idx] % len(chord_names)]
-                chord_notes = chords[chord_name]
+                # Get scale degree from progression
+                scale_degree = full_progression[chord_idx]
+                
+                # Get chord quality based on scale degree
+                chord_quality = major_scale_chords[scale_degree % 7]
+                chord_intervals = chords[chord_quality]
+                
+                # Calculate root note (scale degree + key)
+                chord_root = (root_note + degree_offsets[scale_degree % 7]) % 12
                 
                 # Get duration
                 duration_idx = duration_indices[chord_idx] % len(DURATIONS)
                 duration = float(DURATIONS[duration_idx])
                 
                 # Add notes
-                for note_idx, base_note in enumerate(chord_notes):
+                for note_idx, interval in enumerate(chord_intervals):
                     if note_counter >= len(velocities):
                         break
                         
-                    note_offset = note_offsets[note_counter]
-                    final_note = max(0, min(127, int(base_note) + note_offset + 60))
+                    # Build note: middle C (60) + chord root + interval
+                    final_note = 60 + chord_root + interval
+                    final_note = max(0, min(127, final_note))
+                    
                     velocity = max(1, min(127, velocities[note_counter]))
                     
                     midi.addNote(track, channel, final_note, time_pos, duration, velocity)
@@ -362,9 +439,14 @@ def generate_midi_file(args):
         
         # Save file
         try:
-            method_prefix = generation_method.lower()
-            filename = f"{method_prefix}_{index:05d}_c{num_chords}_t{TEMPO}.mid"
+            # Filename format requested: "Cmaj - C-Em7-Am-F 100bpm.mid"
+            filename = f"{root_name}maj - {filename_chords} {TEMPO}bpm.mid"
+
+            # Collision-safe: if the same key/progression repeats, append the index
             out_path = OUTPUT_DIR / filename
+            if out_path.exists():
+                filename = f"{root_name}maj - {filename_chords} {TEMPO}bpm_{index:05d}.mid"
+                out_path = OUTPUT_DIR / filename
             
             with open(out_path, "wb") as f:
                 midi.writeFile(f)

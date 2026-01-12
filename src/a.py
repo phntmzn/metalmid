@@ -354,7 +354,9 @@ def generate_midi_file(args):
         full_progression = full_progression[:num_chords]
         
         # Calculate exact counts needed
-        total_notes = num_chords * 4  # Assume max 4 notes per chord
+        # Allocate enough velocities for the densest rhythm styles (up to 16 events in 4 bars, up to 4 notes each)
+        MAX_EVENTS = BARS * BEATS_PER_BAR  # 16 events max for beat/off-beat
+        total_notes = MAX_EVENTS * 4
         
         # Generate parameter arrays with correct counts
         try:
@@ -395,45 +397,254 @@ def generate_midi_file(args):
         except Exception as e:
             return f"❌ MIDI {index} MIDI setup failed: {str(e)}"
         
-        # Generate chords
+        # Generate chords / note events using rhythm templates (guaranteed 4 bars, no overshoot)
         try:
-            max_time = BARS * BEATS_PER_BAR
+            total_beats = BARS * BEATS_PER_BAR  # 16 beats
             note_counter = 0
-            
-            for chord_idx in range(num_chords):
-                if time_pos >= max_time:
-                    break
-                
-                # Get scale degree from progression
+
+            rng = random.Random(base_seed + 17)
+
+            # Choose a rhythm template per file (what user requested)
+            rhythm_template = rng.choice([
+                "whole_bar", "half_bar", "tresillo", "back_beat", "off_beat", "beat"
+            ])
+
+            def build_events(style: str):
+                events = []
+                if style == "whole_bar":
+                    # 1 chord/event per bar
+                    for b in range(BARS):
+                        events.append((b * 4.0, 4.0))
+                elif style == "half_bar":
+                    # 2 events per bar
+                    for i in range(BARS * 2):
+                        events.append((i * 2.0, 2.0))
+                elif style == "beat":
+                    # on every beat
+                    for i in range(BARS * 4):
+                        events.append((i * 1.0, 1.0))
+                elif style == "off_beat":
+                    # on every "&" (the offbeat)
+                    for i in range(BARS * 4):
+                        events.append((i * 1.0 + 0.5, 0.5))
+                elif style == "back_beat":
+                    # beats 2 and 4 in each bar (0-indexed: 1 and 3)
+                    for b in range(BARS):
+                        events.append((b * 4.0 + 1.0, 1.0))
+                        events.append((b * 4.0 + 3.0, 1.0))
+                elif style == "tresillo":
+                    # tresillo 3-3-2 in 8th-note grid per bar: hits at 0, 1.5, 3.0 beats
+                    for b in range(BARS):
+                        base = b * 4.0
+                        for off in (0.0, 1.5, 3.0):
+                            events.append((base + off, 0.5))
+                else:
+                    events.append((0.0, 4.0))
+
+                # Clip to the 4-bar window and ensure positive durations
+                clipped = []
+                for t, d in events:
+                    if t >= total_beats:
+                        continue
+                    end = min(total_beats, t + d)
+                    if end > t:
+                        clipped.append((t, end - t))
+                return clipped
+
+            events = build_events(rhythm_template)
+            if not events:
+                events = [(0.0, total_beats)]
+
+            # Decide if we play block chords or arpeggio patterns per file
+            rhythm_style = "arp" if rng.random() < 0.55 else "block"
+            arp_patterns = [
+                "arp_1-2",
+                "arp_x-1-2",
+                "arp_1-2-3",
+                "arp_1-3-2",
+                "arp_x-1-2-1",
+                "arp_x-1-2-3-2",
+                "arp_1-2-3-4",
+                "arp_1-2-4-3",
+                "simple_run",
+                "zig_zag_run",
+                "straddle_run",
+            ]
+            arp_pattern = rng.choice(arp_patterns) if rhythm_style == "arp" else None
+
+            def _idx_safe(i: int, n: int) -> int:
+                if n <= 0:
+                    return 0
+                return max(0, min(n - 1, int(i)))
+
+            def build_arp_sequence(intervals_sorted, pattern_name: str):
+                """
+                intervals_sorted: sorted list of chord intervals (e.g., [0,4,7] or [0,3,7,10])
+                returns a list of interval offsets to play in order. 'x' means octave-up of the lowest chord tone.
+                """
+                n = len(intervals_sorted)
+                if n == 0:
+                    return []
+
+                x = intervals_sorted[0] + 12  # octave-up of lowest tone
+
+                # Helper to map 1-based chord-tone numbers to indices
+                def tone(k1_based: int) -> int:
+                    return _idx_safe(k1_based - 1, n)
+
+                if pattern_name == "arp_1-2":
+                    idxs = [tone(1), tone(2)]
+                    return [intervals_sorted[i] for i in idxs]
+
+                if pattern_name == "arp_x-1-2":
+                    idxs = [tone(1), tone(2)]
+                    return [x] + [intervals_sorted[i] for i in idxs]
+
+                if pattern_name == "arp_1-2-3":
+                    idxs = [tone(1), tone(2), tone(3)]
+                    return [intervals_sorted[i] for i in idxs]
+
+                if pattern_name == "arp_1-3-2":
+                    idxs = [tone(1), tone(3), tone(2)]
+                    return [intervals_sorted[i] for i in idxs]
+
+                if pattern_name == "arp_x-1-2-1":
+                    idxs = [tone(1), tone(2), tone(1)]
+                    return [x] + [intervals_sorted[i] for i in idxs]
+
+                if pattern_name == "arp_x-1-2-3-2":
+                    idxs = [tone(1), tone(2), tone(3), tone(2)]
+                    return [x] + [intervals_sorted[i] for i in idxs]
+
+                if pattern_name == "arp_1-2-3-4":
+                    # If triad, the "4" becomes the top tone (clamped)
+                    idxs = [tone(1), tone(2), tone(3), tone(4)]
+                    return [intervals_sorted[i] for i in idxs]
+
+                if pattern_name == "arp_1-2-4-3":
+                    idxs = [tone(1), tone(2), tone(4), tone(3)]
+                    return [intervals_sorted[i] for i in idxs]
+
+                if pattern_name == "simple_run":
+                    # Up then a small return
+                    if n == 1:
+                        return [intervals_sorted[0]]
+                    if n == 2:
+                        return [intervals_sorted[0], intervals_sorted[1], intervals_sorted[0]]
+                    if n == 3:
+                        return [intervals_sorted[0], intervals_sorted[1], intervals_sorted[2], intervals_sorted[1]]
+                    return [intervals_sorted[0], intervals_sorted[1], intervals_sorted[2], intervals_sorted[3], intervals_sorted[2], intervals_sorted[1]]
+
+                if pattern_name == "zig_zag_run":
+                    # Alternate low/high inward: 1, n, 2, n-1, ...
+                    seq = []
+                    lo, hi = 0, n - 1
+                    while lo <= hi:
+                        seq.append(intervals_sorted[lo])
+                        if lo != hi:
+                            seq.append(intervals_sorted[hi])
+                        lo += 1
+                        hi -= 1
+                    return seq
+
+                if pattern_name == "straddle_run":
+                    # "Straddle": bottom, top, then middles
+                    if n == 1:
+                        return [intervals_sorted[0]]
+                    if n == 2:
+                        return [intervals_sorted[0], intervals_sorted[1], intervals_sorted[0]]
+                    if n == 3:
+                        return [intervals_sorted[0], intervals_sorted[2], intervals_sorted[1], intervals_sorted[2]]
+                    # 4-note: 1,4,2,3,2
+                    return [intervals_sorted[0], intervals_sorted[3], intervals_sorted[1], intervals_sorted[2], intervals_sorted[1]]
+
+                # Default: play as-is
+                return list(intervals_sorted)
+
+            for ev_i, (time_pos, duration) in enumerate(events):
+                # Pick which chord to play on this event (cycle through the progression)
+                chord_idx = ev_i % len(full_progression)
                 scale_degree = full_progression[chord_idx]
-                
-                # Get chord quality based on scale degree
+
+                # Chord quality and intervals (diatonic, simple)
                 chord_quality = major_scale_chords[scale_degree % 7]
-                chord_intervals = chords[chord_quality]
-                
-                # Calculate root note (scale degree + key)
+                chord_intervals = chords.get(chord_quality, chords["Major"])
+
+                # Root note for this scale degree
                 chord_root = (root_note + degree_offsets[scale_degree % 7]) % 12
-                
-                # Get duration
-                duration_idx = duration_indices[chord_idx] % len(DURATIONS)
-                duration = float(DURATIONS[duration_idx])
-                
-                # Add notes
-                for note_idx, interval in enumerate(chord_intervals):
+
+                # Per-event voicing controls
+                inv = rng.randint(0, 2)
+                is_open = (rng.random() < 0.33)
+
+                intervals = list(chord_intervals)
+                if not intervals:
+                    continue
+
+                # Inversion
+                inv = min(int(inv), max(0, len(intervals) - 1))
+                for _ in range(inv):
+                    x = intervals.pop(0)
+                    intervals.append(x + 12)
+
+                # Open voicing (lift upper tones sometimes)
+                if is_open and len(intervals) >= 3:
+                    for j in range(1, len(intervals)):
+                        if rng.random() < 0.25:
+                            intervals[j] += 12
+
+                intervals.sort()
+
+                # Add notes (block or patterned arpeggio), never spilling past the event duration or 4-bar window
+                if rhythm_style == "arp" and arp_pattern:
+                    seq = build_arp_sequence(intervals, arp_pattern)
+                else:
+                    seq = list(intervals)
+
+                if not seq:
+                    continue
+
+                # Step size for arps: fit the whole pattern inside this event
+                # (leave a tiny tail so the last note doesn't exceed event end)
+                step = float(duration / max(1, len(seq)))
+                if step <= 0:
+                    continue
+
+                for note_idx, interval in enumerate(seq):
                     if note_counter >= len(velocities):
                         break
-                        
-                    # Build note: middle C (60) + chord root + interval
+
                     final_note = 60 + chord_root + interval
-                    final_note = max(0, min(127, final_note))
-                    
-                    velocity = max(1, min(127, velocities[note_counter]))
-                    
-                    midi.addNote(track, channel, final_note, time_pos, duration, velocity)
+                    final_note = max(0, min(127, int(final_note)))
+
+                    velocity = max(1, min(127, int(velocities[note_counter])))
+
+                    if rhythm_style == "arp" and arp_pattern:
+                        note_time = float(time_pos + step * note_idx)
+                        event_end = float(time_pos + duration)
+                        # Clamp start within the event and 4-bar window
+                        if note_time >= event_end:
+                            note_time = max(float(time_pos), event_end - 0.01)
+                    else:
+                        note_time = float(time_pos)
+
+                    # Duration: for arps, keep notes shorter so they read as an arp; for block, sustain
+                    if rhythm_style == "arp" and arp_pattern:
+                        dur = float(min(step * 0.95, duration))
+                    else:
+                        dur = float(duration)
+
+                    # Final clamp so note never extends beyond 4 bars (16 beats) nor past event end
+                    end_limit = float(total_beats)
+                    event_limit = float(time_pos + duration)
+                    hard_end = min(end_limit, event_limit)
+                    dur = float(min(dur, max(0.0, hard_end - note_time)))
+                    if dur <= 0:
+                        continue
+
+                    midi.addNote(track, channel, final_note, note_time, dur, velocity)
                     note_counter += 1
-                
-                time_pos += duration
-                
+
         except Exception as e:
             return f"❌ MIDI {index} chord generation failed: {str(e)}"
         

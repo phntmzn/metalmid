@@ -406,7 +406,7 @@ def generate_midi_file(args):
 
             # Choose a rhythm template per file (what user requested)
             rhythm_template = rng.choice([
-                "whole_bar", "half_bar", "tresillo", "back_beat", "off_beat", "beat"
+                "whole_bar", "half_bar", "tresillo", "dance", "back_beat", "off_beat", "beat"
             ])
 
             def build_events(style: str):
@@ -437,6 +437,12 @@ def generate_midi_file(args):
                     for b in range(BARS):
                         base = b * 4.0
                         for off in (0.0, 1.5, 3.0):
+                            events.append((base + off, 0.5))
+                elif style == "dance":
+                    # Dance stabs (4 hits per bar): syncopated 0, 1.5, 2.0, 3.5
+                    for b in range(BARS):
+                        base = b * 4.0
+                        for off in (0.0, 1.5, 2.0, 3.5):
                             events.append((base + off, 0.5))
                 else:
                     events.append((0.0, 4.0))
@@ -469,7 +475,22 @@ def generate_midi_file(args):
                 "simple_run",
                 "zig_zag_run",
                 "straddle_run",
+                "Basic 1",
+                "Basic 2",
+                "Basic 3",
+                "Basic 4",
+                "Pop 2",
+                "Pop 3",
+                "Pop 4",
+                "Pop 5",
+                "Dance 1",
+                "Dance 2",
+                "Rock 1",
+                "Rock 2",
+                "Rock 3",
+                "Rock 4",
             ]
+
             arp_pattern = rng.choice(arp_patterns) if rhythm_style == "arp" else None
 
             def _idx_safe(i: int, n: int) -> int:
@@ -488,9 +509,85 @@ def generate_midi_file(args):
 
                 x = intervals_sorted[0] + 12  # octave-up of lowest tone
 
-                # Helper to map 1-based chord-tone numbers to indices
+                # Helper: pick chord tones safely (1-based)
                 def tone(k1_based: int) -> int:
                     return _idx_safe(k1_based - 1, n)
+
+                # Convenience: common tones if present
+                root = intervals_sorted[tone(1)]
+                third = intervals_sorted[tone(2)] if n >= 2 else root
+                fifth = intervals_sorted[tone(3)] if n >= 3 else third
+                seventh = intervals_sorted[tone(4)] if n >= 4 else fifth
+
+                # --- New "style" names ---
+                # Basic = simple up/down/bounce variations
+                if pattern_name == "Basic 1":
+                    # 1-2-3 (or 1-2-3-4 if available)
+                    seq = [root, third, fifth]
+                    if n >= 4:
+                        seq.append(seventh)
+                    return seq
+
+                if pattern_name == "Basic 2":
+                    # Down: 3-2-1 (or 4-3-2-1)
+                    if n >= 4:
+                        return [seventh, fifth, third, root]
+                    return [fifth, third, root]
+
+                if pattern_name == "Basic 3":
+                    # Bounce: 1-2-3-2 (or 1-2-3-4-3-2)
+                    if n >= 4:
+                        return [root, third, fifth, seventh, fifth, third]
+                    return [root, third, fifth, third]
+
+                if pattern_name == "Basic 4":
+                    # Octave lead: x-1-2-3 (or x-1-2-3-4)
+                    seq = [x, root, third, fifth]
+                    if n >= 4:
+                        seq.append(seventh)
+                    return seq
+
+                # Pop = octave lift + catchy back-and-forth
+                if pattern_name == "Pop 2":
+                    return [x, root, third]
+
+                if pattern_name == "Pop 3":
+                    return [x, root, third, root]
+
+                if pattern_name == "Pop 4":
+                    return [x, root, third, fifth, third]
+
+                if pattern_name == "Pop 5":
+                    # Up then down, with octave pickup
+                    if n >= 4:
+                        return [x, root, third, fifth, seventh, fifth, third]
+                    return [x, root, third, fifth, third]
+
+                # Dance = tight repeated stabs (good with off-beats)
+                if pattern_name == "Dance 1":
+                    # 1-2-1-3 (small jump)
+                    return [root, third, root, fifth]
+
+                if pattern_name == "Dance 2":
+                    # Pump octave: x-1-x-2
+                    return [x, root, x, third]
+
+                # Rock = power-chord-ish movement using root + fifth + octave
+                if pattern_name == "Rock 1":
+                    # 1-5-x-5 (power)
+                    return [root, fifth, x, fifth]
+
+                if pattern_name == "Rock 2":
+                    # 1-5-1 (simple power)
+                    return [root, fifth, root]
+
+                if pattern_name == "Rock 3":
+                    # 1-5-3-5 (riffy)
+                    return [root, fifth, third, fifth]
+
+                if pattern_name == "Rock 4":
+                    # 1-2-3-x
+                    return [root, third, fifth, x]
 
                 if pattern_name == "arp_1-2":
                     idxs = [tone(1), tone(2)]

@@ -1,12 +1,4 @@
-# Direct import for Metal and dependencies
-import objc
-from Cocoa import NSObject
-from Metal import MTLCreateSystemDefaultDevice, MTLResourceStorageModeShared
-from Foundation import NSData
-
-METAL_AVAILABLE = True
-print("🔧 Metal framework loaded successfully")
-# a.py — GPU-assisted MIDI generator (.mid output) - Fixed Version
+# a.py — GPU-assisted MIDI generator (.mid output) - FIXED VERSION
 
 import random
 import os
@@ -21,8 +13,19 @@ import struct
 
 from midiutil import MIDIFile
 
+# Direct import for Metal and dependencies
+try:
+    import objc
+    from Cocoa import NSObject
+    from Metal import MTLCreateSystemDefaultDevice, MTLResourceStorageModeShared
+    from Foundation import NSData
+    METAL_AVAILABLE = True
+    print("🔧 Metal framework loaded successfully")
+except ImportError as e:
+    METAL_AVAILABLE = False
+    print(f"⚠️  Metal not available: {e}")
+
 # Mock the b.py imports since they're not provided
-# You should replace these with your actual imports from b.py
 notes = {
     'C': 60, 'C#': 61, 'D': 62, 'D#': 63, 'E': 64, 'F': 65,
     'F#': 66, 'G': 67, 'G#': 68, 'A': 69, 'A#': 70, 'B': 71
@@ -48,7 +51,6 @@ time_value_durations = {
     "thirty_second_note": 0.125
 }
 
-# === Additional definitions for scales and modes ===
 scales = {
     "major": [0, 2, 4, 5, 7, 9, 11],
     "minor": [0, 2, 3, 5, 7, 8, 10],
@@ -61,21 +63,11 @@ scales = {
     "locrian": [0, 1, 3, 5, 6, 8, 10]
 }
 
-modes = {
-    "ionian": scales["major"],
-    "aeolian": scales["minor"],
-    "dorian": scales["dorian"],
-    "phrygian": scales["phrygian"],
-    "lydian": scales["lydian"],
-    "mixolydian": scales["mixolydian"],
-    "locrian": scales["locrian"]
-}
-
 # Convert durations dict to list for index-based access
 DURATIONS = list(time_value_durations.values())
 
 # === CONFIGURATION ===
-TOTAL_FILES = 10
+TOTAL_FILES = 1000
 TEMPO = 157
 OUTPUT_DIR = Path.home() / "Desktop" / "MIDI_Output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -87,7 +79,6 @@ DURATION_MINUTES = 2
 TOTAL_BEATS = BEATS_PER_MINUTE * DURATION_MINUTES
 BEATS_PER_BAR = 4
 BARS = 4
-
 
 
 class SimpleMetalProcessor:
@@ -111,15 +102,6 @@ class SimpleMetalProcessor:
         shader_source = """
         #include <metal_stdlib>
         using namespace metal;
-
-        // === Scale and mode interval definitions ===
-        constant int major_scale[7] = {0, 2, 4, 5, 7, 9, 11};
-        constant int minor_scale[7] = {0, 2, 3, 5, 7, 8, 10};
-        constant int dorian_mode[7] = {0, 2, 3, 5, 7, 9, 10};
-        constant int phrygian_mode[7] = {0, 1, 3, 5, 7, 8, 10};
-        constant int lydian_mode[7] = {0, 2, 4, 6, 7, 9, 11};
-        constant int mixolydian_mode[7] = {0, 2, 4, 5, 7, 9, 10};
-        constant int locrian_mode[7] = {0, 1, 3, 5, 6, 8, 10};
 
         kernel void generate_random(device float *output [[buffer(0)]],
                                    constant uint &seed [[buffer(1)]],
@@ -164,6 +146,7 @@ class SimpleMetalProcessor:
             return []
         if count > 4096:
             raise ValueError(f"Count too high for safe Metal dispatch: {count}")
+            
         with self.lock:
             try:
                 # Create output buffer
@@ -173,58 +156,57 @@ class SimpleMetalProcessor:
                 )
                 if not output_buffer:
                     raise RuntimeError("Could not create output buffer")
-                # Create seed buffer (single uint32), pass pointer directly for correct Metal binding
-                seed_value = ctypes.c_uint32(seed % (2**32))
+                    
+                # Create seed buffer as bytes
+                seed_bytes = struct.pack("I", seed % (2**32))
                 seed_buffer = self.device.newBufferWithBytes_length_options_(
-                    ctypes.byref(seed_value), ctypes.sizeof(seed_value), MTLResourceStorageModeShared
+                    seed_bytes, len(seed_bytes), MTLResourceStorageModeShared
                 )
                 if not seed_buffer:
                     raise RuntimeError("Could not create seed buffer")
+                    
                 # Create command buffer and encoder
                 cmd_buffer = self.queue.commandBuffer()
                 if not cmd_buffer:
                     raise RuntimeError("Could not create command buffer")
+                    
                 encoder = cmd_buffer.computeCommandEncoder()
                 if not encoder:
                     raise RuntimeError("Could not create compute encoder")
+                    
                 # Set up compute pass
                 encoder.setComputePipelineState_(self.pipeline)
                 encoder.setBuffer_offset_atIndex_(output_buffer, 0, 0)
                 encoder.setBuffer_offset_atIndex_(seed_buffer, 0, 1)
+                
                 # Dispatch threads
-                threads_per_group = min(32, count)  # Conservative thread group size
-                # Calculate total_threads as the next multiple of threads_per_group >= count
-                total_threads = ((count + threads_per_group - 1) // threads_per_group) * threads_per_group
-                grid_size = self.MTLSizeMake(total_threads, 1, 1)
-                threadgroup_size = self.MTLSizeMake(threads_per_group, 1, 1)
+                threads_per_group = min(32, count)
+                grid_size = (count, 1, 1)
+                threadgroup_size = (threads_per_group, 1, 1)
                 encoder.dispatchThreads_threadsPerThreadgroup_(grid_size, threadgroup_size)
                 encoder.endEncoding()
+                
                 # Execute and wait
                 cmd_buffer.commit()
                 cmd_buffer.waitUntilCompleted()
-                # Read results using safe buffer copy
+                
+                # Read results
                 raw_ptr = output_buffer.contents()
                 if raw_ptr is None:
                     raise RuntimeError("Output buffer has no contents")
 
-                array_type = ctypes.c_float * count
-                buf = ctypes.cast(raw_ptr, ctypes.POINTER(array_type)).contents
-                return list(buf)
+                byte_count = count * 4
+                data = ctypes.string_at(raw_ptr, byte_count)
+                return list(struct.unpack(f"{count}f", data))
+                
             except Exception as e:
                 raise RuntimeError(f"Metal computation failed: {e}")
-    
-    def MTLSizeMake(self, width, height, depth):
-        """Helper to create MTLSize"""
-        try:
-            size_type = objc.createStructType('MTLSize', b'{MTLSize=QQQ}', ['width', 'height', 'depth'])
-            return size_type(width, height, depth)
-        except:
-            # Fallback if struct creation fails
-            return (width, height, depth)
+
 
 # Global processor instance
 metal_processor = None
 processor_lock = threading.Lock()
+
 
 def get_metal_processor():
     """Get or create the Metal processor"""
@@ -237,211 +219,158 @@ def get_metal_processor():
                     return metal_processor
                 except Exception as e:
                     print(f"⚠️  Metal processor creation failed: {e}")
-                    raise RuntimeError("Metal processor not available")
+                    return None
             else:
-                raise RuntimeError("Metal processor not available")
+                return None
         return metal_processor
-
-def generate_chord_pattern():
-    """Generate a MIDI chord pattern using Locrian mode"""
-    # Chromatic scale notes in semitones from C
-    chromatic_scale = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
-    note_to_semitone = {note: i for i, note in enumerate(chromatic_scale)}
-    semitone_to_note = {i: note for i, note in enumerate(chromatic_scale)}
-
-    # === Use GPU-based random selection for root note and progression ===
-    seed = int(time.time()) + 42  # Optional external seed
-
-    # Metal-style Locrian progressions
-    metal_locrian_progressions = [
-        [0, 6, 5, 4],  # i° - bVII - bVI - V
-        [0, 3, 1, 4],  # i° - iv - II - V
-        [0, 6, 0],     # i° - bVII - i°
-        [0, 1, 3, 5]   # i° - II - iv - bVI
-    ]
-    root_idx = generate_values_gpu(seed, 1, 'raw')[0]
-    prog_idx = generate_values_gpu(seed + 1, 1, 'raw')[0]
-
-    root_note = chromatic_scale[int(root_idx * len(chromatic_scale)) % len(chromatic_scale)]
-    progression_degrees = metal_locrian_progressions[int(prog_idx * len(metal_locrian_progressions)) % len(metal_locrian_progressions)]
-    # Old random selection lines (now replaced by GPU):
-    # root_note = random.choice(chromatic_scale)
-    # progression_degrees = random.choice(metal_locrian_progressions)
-
-    # Locrian mode intervals in semitones from tonic
-    locrian_intervals = [0, 1, 3, 5, 6, 8, 10]
-
-    # Chord types for Locrian mode (triads)
-    locrian_chord_types = [
-        "Diminished",  # i°
-        "Minor",       # II
-        "Major",       # bIII
-        "Minor",       # iv
-        "Major",       # V
-        "Major",       # bVI
-        "Minor"        # bVII
-    ]
-
-    root_semitone = note_to_semitone[root_note]
-
-    # Build Locrian scale notes based on root
-    locrian_scale = []
-    for interval in locrian_intervals:
-        semitone = (root_semitone + interval) % 12
-        locrian_scale.append(semitone_to_note[semitone])
-
-    duration = time_value_durations["eighth_note"]
-    steps_per_bar = 4  # quarter notes per bar
-
-    midi = MIDIFile(1)
-    midi.addTempo(0, 0, TEMPO)
-
-    # === Generate 4-bar arpeggio ===
-    steps_per_bar = 4
-    duration = BEATS_PER_BAR / steps_per_bar  # each note gets one step
-
-    for bar_index in range(BARS):  # 4 bars
-        for step in range(steps_per_bar):
-            time = float(bar_index * BEATS_PER_BAR + step * duration)
-            prog_idx = (bar_index * steps_per_bar + step) % len(progression_degrees)
-            scale_degree = progression_degrees[prog_idx]
-            root_scale_note = locrian_scale[scale_degree]
-            chord_type = locrian_chord_types[scale_degree]
-            intervals = chords.get(chord_type, chords["Minor"])
-            root_note_number = notes[root_scale_note]
-
-            # Add arpeggiated notes: one note per step
-            interval = intervals[step % len(intervals)]
-            note = root_note_number + interval + 60
-            midi.addNote(0, 0, note, time, duration, 100)
-    return midi
 
 
 def generate_values_gpu(seed, count, value_type):
-    """GPU-based random value generation"""
+    """GPU-based random value generation with CPU fallback"""
+    # Ensure seed is positive
+    seed = abs(seed) % (2**31)
+    
     processor = get_metal_processor()
-    if not processor:
-        raise RuntimeError("Metal processor not available")
-    try:
-        # Get raw random values from GPU
-        raw_values = processor.generate_random_values(seed, count)
-        if not raw_values:
-            raise RuntimeError("Metal processor not available")
-        # Map to appropriate ranges
-        mapped_values = []
-        for val in raw_values:
-            if value_type == 'velocity':
-                mapped_values.append(int(40 + val * 87))
-            elif value_type == 'note_offset':
-                mapped_values.append(int(-12 + val * 24))
-            elif value_type == 'duration_index':
-                mapped_values.append(int(val * len(time_value_durations)))
-            else:
-                mapped_values.append(val)
-        return mapped_values
-    except Exception as e:
-        print(f"⚠️  GPU generation failed: {e}")
-        raise RuntimeError("Metal processor not available")
+    
+    # Try GPU first
+    if processor:
+        try:
+            raw_values = processor.generate_random_values(seed, count)
+            if raw_values and len(raw_values) == count:
+                # Map to appropriate ranges
+                mapped_values = []
+                for val in raw_values:
+                    if value_type == 'velocity':
+                        mapped_values.append(int(40 + val * 87))
+                    elif value_type == 'note_offset':
+                        mapped_values.append(int(-12 + val * 24))
+                    elif value_type == 'duration_index':
+                        mapped_values.append(int(val * len(DURATIONS)))
+                    elif value_type == 'chord_index':
+                        mapped_values.append(int(val * len(chords)))
+                    else:
+                        mapped_values.append(val)
+                return mapped_values, True  # Success, used GPU
+        except Exception as e:
+            print(f"⚠️  GPU generation failed, using CPU: {e}")
+    
+    # CPU fallback
+    random.seed(seed)
+    mapped_values = []
+    for _ in range(count):
+        val = random.random()
+        if value_type == 'velocity':
+            mapped_values.append(int(40 + val * 87))
+        elif value_type == 'note_offset':
+            mapped_values.append(int(-12 + val * 24))
+        elif value_type == 'duration_index':
+            mapped_values.append(int(val * len(DURATIONS)))
+        elif value_type == 'chord_index':
+            mapped_values.append(int(val * len(chords)))
+        else:
+            mapped_values.append(val)
+    return mapped_values, False  # Used CPU
+
 
 def generate_midi_file(args):
     """Generate a single MIDI file"""
-    index, num_chords, use_gpu = args
+    index, num_chords, use_gpu, base_time = args
     
     try:
-        # Generate base seed
-        base_seed = random.randint(0, 100000)
-        # Generate parameter arrays
+        # Generate base seed using file index and base time to avoid collisions
+        # Use prime number multiplier to ensure good distribution
+        base_seed = abs((base_time + index * 104729) % (2**31))
+        
+        # Calculate exact counts needed
+        max_notes_per_chord = max(len(chord) for chord in chords.values())
+        total_notes = num_chords * max_notes_per_chord
+        
+        # Generate parameter arrays with correct counts
         try:
             if use_gpu:
-                velocities = generate_values_gpu(base_seed, num_chords * 4, 'velocity')
-                note_offsets = generate_values_gpu(base_seed + 1, num_chords * 4, 'note_offset')
-                duration_indices = generate_values_gpu(base_seed + 2, num_chords, 'duration_index')
-                generation_method = "GPU"
+                velocities, gpu1 = generate_values_gpu(base_seed, total_notes, 'velocity')
+                note_offsets, gpu2 = generate_values_gpu(base_seed + 1, total_notes, 'note_offset')
+                duration_indices, gpu3 = generate_values_gpu(base_seed + 2, num_chords, 'duration_index')
+                chord_indices, gpu4 = generate_values_gpu(base_seed + 3, num_chords, 'chord_index')
+                
+                used_gpu = gpu1 and gpu2 and gpu3 and gpu4
+                generation_method = "GPU" if used_gpu else "CPU"
             else:
-                raise RuntimeError("GPU not available; CPU fallback not allowed")
+                velocities, _ = generate_values_gpu(base_seed, total_notes, 'velocity')
+                note_offsets, _ = generate_values_gpu(base_seed + 1, total_notes, 'note_offset')
+                duration_indices, _ = generate_values_gpu(base_seed + 2, num_chords, 'duration_index')
+                chord_indices, _ = generate_values_gpu(base_seed + 3, num_chords, 'chord_index')
+                generation_method = "CPU"
+                
         except Exception as e:
             return f"❌ MIDI {index} parameter generation failed: {str(e)}"
         
-        # Validate we have the right number of values
-        if (len(velocities) < num_chords * 4 or 
-            len(note_offsets) < num_chords * 4 or 
-            len(duration_indices) < num_chords):
-            return f"❌ MIDI {index} insufficient parameters: v={len(velocities)}, n={len(note_offsets)}, d={len(duration_indices)}"
-        
-        # Debug print for first file
-        if index == 0:
-            print(f"Debug - Velocities: {velocities[:4]}")
-            print(f"Debug - Note offsets: {note_offsets[:4]}")
-            print(f"Debug - Duration indices: {duration_indices[:2]}")
+        # Validate counts
+        if (len(velocities) < total_notes or 
+            len(note_offsets) < total_notes or 
+            len(duration_indices) < num_chords or
+            len(chord_indices) < num_chords):
+            return f"❌ MIDI {index} insufficient parameters"
         
         # Create MIDI file
         try:
             midi = MIDIFile(1)
             track = 0
-            time = 0.0
+            time_pos = 0.0
             
-            midi.addTrackName(track, time, f"{generation_method} Track {index}")
-            
-            # Use fixed tempo
-            tempo = TEMPO
-            midi.addTempo(track, time, TEMPO)
+            midi.addTrackName(track, time_pos, f"{generation_method} Track {index}")
+            midi.addTempo(track, time_pos, TEMPO)
             channel = 0
+            
         except Exception as e:
             return f"❌ MIDI {index} MIDI setup failed: {str(e)}"
         
         # Generate chords
         try:
             chord_names = list(chords.keys())
-            
             max_time = BARS * BEATS_PER_BAR
+            note_counter = 0
+            
             for chord_idx in range(num_chords):
-                if time >= max_time:
+                if time_pos >= max_time:
                     break
-                # Select chord - use index instead of velocity to avoid issues
-                chord_name = chord_names[chord_idx % len(chord_names)]
+                
+                # Select chord using pre-generated index
+                chord_name = chord_names[chord_indices[chord_idx] % len(chord_names)]
                 chord_notes = chords[chord_name]
-
+                
                 # Get duration
-                duration_idx = abs(int(duration_indices[chord_idx])) % len(DURATIONS)
+                duration_idx = duration_indices[chord_idx] % len(DURATIONS)
                 duration = float(DURATIONS[duration_idx])
-
+                
                 # Add notes
                 for note_idx, base_note in enumerate(chord_notes):
-                    # Calculate final parameters
-                    array_idx = chord_idx * 4 + note_idx
-
-                    if array_idx < len(note_offsets):
-                        note_offset = int(note_offsets[array_idx])
-                    else:
-                        note_offset = 0
-
-                    final_note = max(0, min(127, int(base_note) + note_offset + 60))  # Add base note (C4)
-
-                    if array_idx < len(velocities):
-                        velocity = max(1, min(127, abs(int(velocities[array_idx]))))
-                    else:
-                        velocity = 64
-
-                    # Debug for first chord of first file
-                    if index == 0 and chord_idx == 0 and note_idx == 0:
-                        print(f"Debug - First note: {final_note}, velocity: {velocity}, time: {time}, duration: {duration}")
-
-                    midi.addNote(track, channel, final_note, time, duration, velocity)
-
-                time += duration
+                    if note_counter >= len(velocities):
+                        break
+                        
+                    note_offset = note_offsets[note_counter]
+                    final_note = max(0, min(127, int(base_note) + note_offset + 60))
+                    velocity = max(1, min(127, velocities[note_counter]))
+                    
+                    midi.addNote(track, channel, final_note, time_pos, duration, velocity)
+                    note_counter += 1
+                
+                time_pos += duration
+                
         except Exception as e:
             return f"❌ MIDI {index} chord generation failed: {str(e)}"
         
         # Save file
         try:
             method_prefix = generation_method.lower()
-            filename = f"{method_prefix}_{index:05d}_c{num_chords}_t{tempo}.mid"
+            filename = f"{method_prefix}_{index:05d}_c{num_chords}_t{TEMPO}.mid"
             out_path = OUTPUT_DIR / filename
             
             with open(out_path, "wb") as f:
                 midi.writeFile(f)
             
             return f"✅ {filename}"
+            
         except Exception as e:
             return f"❌ MIDI {index} file save failed: {str(e)}"
         
@@ -449,22 +378,22 @@ def generate_midi_file(args):
         import traceback
         return f"❌ MIDI {index} unexpected error: {str(e)}\n{traceback.format_exc()}"
 
+
 def main():
     """Main function"""
-    print("🎵 GPU-Assisted MIDI Generator v2 (Fixed)")
+    print("🎵 GPU-Assisted MIDI Generator v3 (FIXED)")
     print("=" * 40)
     
-    # Configuration
-    total_files = 10
-    num_chords = 4
-    use_gpu = True  # Disable GPU by default due to Metal buffer issues
-    max_workers = cpu_count()
+    # Configuration - use TOTAL_FILES constant
+    total_files = TOTAL_FILES
+    num_chords = 8
+    use_gpu = True
     
     print(f"Generating {total_files} MIDI files...")
     print(f"Chords per file: {num_chords}")
-    print(f"GPU enabled: {use_gpu and METAL_AVAILABLE}")
+    print(f"Tempo: {TEMPO} BPM")
     print(f"Output directory: {OUTPUT_DIR}")
-    print(f"Worker threads: {max_workers}")
+    print(f"Worker threads: {POOL_SIZE}")
     print()
     
     # Test Metal availability
@@ -473,16 +402,29 @@ def main():
         if processor:
             print("🚀 GPU acceleration ready")
         else:
-            raise RuntimeError("GPU acceleration unavailable")
+            print("⚠️  GPU unavailable, will use CPU fallback")
     else:
-        raise RuntimeError("GPU not available")
+        print("💻 Using CPU generation")
     print()
-    # Generate files
-    args_list = [(i, num_chords, use_gpu) for i in range(total_files)]
+    
+    # Generate base time for seed generation
+    base_time = int(time.time() * 1000)
+    
+    # Generate files with parallel processing
+    args_list = [(i, num_chords, use_gpu, base_time) for i in range(total_files)]
     start_time = time.time()
+    
     results = []
-    for args in tqdm(args_list, desc="Generating"):
-        results.append(generate_midi_file(args))
+    
+    # Use ThreadPoolExecutor for parallel processing
+    with ThreadPoolExecutor(max_workers=POOL_SIZE) as executor:
+        # Submit all tasks and track with progress bar
+        futures = [executor.submit(generate_midi_file, args) for args in args_list]
+        
+        # Collect results with progress bar
+        for future in tqdm(futures, desc="Generating", total=total_files):
+            results.append(future.result())
+    
     end_time = time.time()
     
     # Results
@@ -498,7 +440,7 @@ def main():
     gpu_files = [r for r in successes if "gpu_" in r]
     cpu_files = [r for r in successes if "cpu_" in r]
     
-    print(f"✅ Generated: {len(successes)}")
+    print(f"✅ Generated: {len(successes)}/{total_files}")
     if gpu_files:
         print(f"  🚀 GPU: {len(gpu_files)}")
     if cpu_files:
@@ -506,8 +448,11 @@ def main():
     
     if failures:
         print(f"❌ Failed: {len(failures)}")
-        for failure in failures[:3]:  # Show first 3 failures
+        for failure in failures[:5]:  # Show first 5 failures
             print(f"  {failure}")
+    
+    print(f"\nFiles saved to: {OUTPUT_DIR}")
+
 
 if __name__ == "__main__":
     main()
